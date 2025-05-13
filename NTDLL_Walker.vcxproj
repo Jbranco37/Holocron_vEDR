@@ -127,10 +127,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="NTDLL_Walker.cpp" />
+    <ClCompile Include="stealth_Ldr.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Djb2.h" />
+    <ClInclude Include="Stuff.h" />
     <ClInclude Include="XOR.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
