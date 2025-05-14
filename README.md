@@ -22,7 +22,7 @@ It is an ideal platform to:
 
 Holocron vEDR consists of 3 primary components:
 
-[ fHooks.exe ] —> Installs userland hooks on select NTDLL syscalls
+[ fHooks.dll ] —> Installs userland hooks on select NTDLL syscalls
 
 [ fAgent.exe ] —> Inits a named pip svr to view EDR output
 
