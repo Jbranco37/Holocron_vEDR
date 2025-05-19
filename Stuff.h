@@ -153,4 +153,42 @@ typedef NTSTATUS(NTAPI* pNtCreateThreadEx)(
 	PPS_ATTRIBUTE_LIST	AttributeList
 	);
 
+extern "C" NTSTATUS NtAlloc(
+	HANDLE ProcessHandle,
+	PVOID* BaseAddress,
+	ULONG_PTR ZeroBits,
+	PSIZE_T RegionSize,
+	ULONG AllocationType,
+	ULONG Protect
+);
+
+extern "C" NTSTATUS NtWrite(
+	HANDLE ProcessHandle,
+	PVOID BaseAddress,
+	PVOID Buffer,
+	SIZE_T NumOfBytesToWrite,
+	PSIZE_T NumOfBytesWritten
+);
+
+extern "C" NTSTATUS NtProtect(
+	HANDLE ProcessHandle,
+	PVOID* BaseAddress,
+	PSIZE_T RegionSize,
+	ULONG NewProtection,
+	PULONG OldProtection
+);
+
+extern "C" NTSTATUS NtThread(
+	PHANDLE ThreadHandle,
+	ACCESS_MASK DesiredAccess,
+	POBJECT_ATTRIBUTES ObjectAttributes,
+	HANDLE ProcessHandle,
+	PVOID StartRoutine,
+	PVOID Argument,
+	ULONG CreateFlags,
+	SIZE_T ZeroBits,
+	SIZE_T StackSize,
+	SIZE_T MaximumStackSize,
+	PPS_ATTRIBUTE_LIST AttributeList
+);
 #endif
